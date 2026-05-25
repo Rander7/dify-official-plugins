@@ -47,13 +47,13 @@ class _PlatformSpec:
     supports_web_search: bool
 
 
-_VOLCENGINE_PLATFORM = _PlatformSpec(
-    name="volcengine",
-    seedance_prefix="doubao-seedance-",
-    seedream_prefix="doubao-seedream-",
-    supports_web_search=True,
+_BYTEPLUS_PLATFORM = _PlatformSpec(
+    name="byteplus",
+    seedance_prefix="seedance-",
+    seedream_prefix="seedream-",
+    supports_web_search=False,
 )
-_PLATFORM_SPECS = (_VOLCENGINE_PLATFORM,)
+_PLATFORM_SPECS = (_BYTEPLUS_PLATFORM,)
 
 _SEEDANCE_RUNNING_STATUSES = {"queued", "running"}
 _SEEDANCE_FAILED_STATUSES = {"failed", "expired", "cancelled"}
@@ -315,7 +315,7 @@ def _is_retryable_http_status(status_code: int) -> bool:
     return status_code == 429 or 500 <= status_code < 600
 
 
-class VolcengineArkLargeLanguageModel(LargeLanguageModel):
+class BytePlusArkLargeLanguageModel(LargeLanguageModel):
     @property
     def _invoke_error_mapping(self) -> dict[type[InvokeError], list[type[Exception]]]:
         return {}

@@ -367,7 +367,7 @@ class VolcengineArkLargeLanguageModel(LargeLanguageModel):
     ) -> int:
         # No official token counter exposed here; fall back to rough estimate.
         # This is acceptable for plugin implementations that do not support token counting.
-        text = "".join(getattr(m, "content", "") if isinstance(getattr(m, "content", ""), str) else "" for m in prompt_messages)
+        text = _extract_prompt_text(prompt_messages)
         return max(1, len(text) // 4)
 
     def _request_json(

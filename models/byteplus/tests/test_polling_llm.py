@@ -36,6 +36,30 @@ def _credentials() -> dict[str, str]:
     }
 
 
+def test_get_num_tokens_counts_text_from_multimodal_prompt() -> None:
+    model = _model()
+    prompt_text = "make a calm ocean video with detailed camera movement"
+
+    token_count = model.get_num_tokens(
+        model="seedance-2-0-260128",
+        credentials=_credentials(),
+        prompt_messages=[
+            UserPromptMessage(
+                content=[
+                    TextPromptMessageContent(data=prompt_text),
+                    ImagePromptMessageContent(
+                        format="png",
+                        mime_type="image/png",
+                        url="https://example.com/frame.png",
+                    ),
+                ],
+            )
+        ],
+    )
+
+    assert token_count == max(1, len(prompt_text) // 4)
+
+
 class _FakeResponse:
     def __enter__(self) -> "_FakeResponse":
         return self

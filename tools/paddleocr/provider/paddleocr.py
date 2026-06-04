@@ -2,8 +2,6 @@ from typing import Any
 
 from dify_plugin import ToolProvider
 from dify_plugin.errors.tool import ToolProviderCredentialValidationError
-from paddleocr._api_client import PaddleOCRClient
-from paddleocr._api_client.errors import AuthError, PaddleOCRAPIError
 
 from tools.document_parsing import DocumentParsingTool
 from tools.document_parsing_vl import DocumentParsingVlTool
@@ -41,15 +39,21 @@ class PaddleocrProvider(ToolProvider):
                     self._test_tool_validation(
                         credentials, api_url_key, test_file
                     )
-                except AuthError as e:
-                    raise ToolProviderCredentialValidationError(
-                        f"Authentication failed: {e}"
-                    ) from e
-                except PaddleOCRAPIError as e:
-                    raise ToolProviderCredentialValidationError(
-                        f"PaddleOCR API error: {e}"
-                    ) from e
                 except Exception as e:
+                    # Check for specific PaddleOCR error types
+                    try:
+                        from paddleocr._api_client.errors import AuthError, PaddleOCRAPIError
+
+                        if isinstance(e, AuthError):
+                            raise ToolProviderCredentialValidationError(
+                                f"Authentication failed: {e}"
+                            ) from e
+                        if isinstance(e, PaddleOCRAPIError):
+                            raise ToolProviderCredentialValidationError(
+                                f"PaddleOCR API error: {e}"
+                            ) from e
+                    except ImportError:
+                        pass
                     raise ToolProviderCredentialValidationError(
                         f"Validation failed: {e}"
                     ) from e
@@ -64,6 +68,8 @@ class PaddleocrProvider(ToolProvider):
             api_url_key: Key for the API URL in credentials
             test_file: Test file URL
         """
+        from paddleocr._api_client import PaddleOCRClient
+
         access_token = credentials["aistudio_access_token"]
         api_url = credentials[api_url_key]
 

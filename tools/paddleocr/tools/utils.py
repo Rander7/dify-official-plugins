@@ -8,15 +8,6 @@ from urllib.parse import urlparse
 
 from dify_plugin.file.file import File
 from dify_plugin.invocations.file import UploadFileResponse
-from paddleocr._api_client import PaddleOCRClient
-from paddleocr._api_client.models import (
-    DocParsingOptions,
-    Model,
-    OCROptions,
-    PPStructureV3Options,
-    PaddleOCRVLOptions,
-)
-from paddleocr._api_client.results import DocParsingResult, OCRResult
 
 # Pre-compiled regex patterns for performance
 HTML_IMG_PATTERN = re.compile(r'(<img[^>]*src=")([^"]+)(")')
@@ -188,7 +179,7 @@ def cleanup_temp_file(file_path: str, is_temp: bool) -> None:
             logger.warning(f"Failed to clean up temporary file {file_path}: {e}")
 
 
-def get_sdk_client(access_token: str, api_url: str) -> PaddleOCRClient:
+def get_sdk_client(access_token: str, api_url: str) -> Any:
     """Get PaddleOCR SDK client.
 
     Args:
@@ -198,6 +189,8 @@ def get_sdk_client(access_token: str, api_url: str) -> PaddleOCRClient:
     Returns:
         PaddleOCRClient instance
     """
+    from paddleocr._api_client import PaddleOCRClient
+
     base_url = extract_base_url(api_url)
     return PaddleOCRClient(
         token=access_token,
@@ -206,7 +199,7 @@ def get_sdk_client(access_token: str, api_url: str) -> PaddleOCRClient:
     )
 
 
-def ocr_result_to_legacy_format(result: OCRResult) -> dict:
+def ocr_result_to_legacy_format(result: Any) -> dict:
     """Convert SDK OCRResult to legacy API format.
 
     Args:
@@ -228,7 +221,7 @@ def ocr_result_to_legacy_format(result: OCRResult) -> dict:
     }
 
 
-def doc_result_to_legacy_format(result: DocParsingResult) -> dict:
+def doc_result_to_legacy_format(result: Any) -> dict:
     """Convert SDK DocParsingResult to legacy API format.
 
     Args:
@@ -253,7 +246,7 @@ def doc_result_to_legacy_format(result: DocParsingResult) -> dict:
     }
 
 
-def build_ocr_options(params: dict[str, Any]) -> Optional[OCROptions]:
+def build_ocr_options(params: dict[str, Any]) -> Any:
     """Build OCROptions from parameters.
 
     Args:
@@ -262,6 +255,8 @@ def build_ocr_options(params: dict[str, Any]) -> Optional[OCROptions]:
     Returns:
         OCROptions instance or None
     """
+    from paddleocr._api_client.models import OCROptions
+
     option_map = {
         "useDocOrientationClassify": "use_doc_orientation_classify",
         "useDocUnwarping": "use_doc_unwarping",
@@ -283,7 +278,7 @@ def build_ocr_options(params: dict[str, Any]) -> Optional[OCROptions]:
     return OCROptions(**options_dict) if options_dict else None
 
 
-def build_pp_structure_v3_options(params: dict[str, Any]) -> Optional[PPStructureV3Options]:
+def build_pp_structure_v3_options(params: dict[str, Any]) -> Any:
     """Build PPStructureV3Options from parameters.
 
     Args:
@@ -292,6 +287,8 @@ def build_pp_structure_v3_options(params: dict[str, Any]) -> Optional[PPStructur
     Returns:
         PPStructureV3Options instance or None
     """
+    from paddleocr._api_client.models import PPStructureV3Options
+
     option_map = {
         "useDocOrientationClassify": "use_doc_orientation_classify",
         "useDocUnwarping": "use_doc_unwarping",
@@ -342,7 +339,7 @@ def build_pp_structure_v3_options(params: dict[str, Any]) -> Optional[PPStructur
     return PPStructureV3Options(**options_dict) if options_dict else None
 
 
-def build_paddleocr_vl_options(params: dict[str, Any]) -> Optional[PaddleOCRVLOptions]:
+def build_paddleocr_vl_options(params: dict[str, Any]) -> Any:
     """Build PaddleOCRVLOptions from parameters.
 
     Args:
@@ -351,6 +348,8 @@ def build_paddleocr_vl_options(params: dict[str, Any]) -> Optional[PaddleOCRVLOp
     Returns:
         PaddleOCRVLOptions instance or None
     """
+    from paddleocr._api_client.models import PaddleOCRVLOptions
+
     option_map = {
         "useDocOrientationClassify": "use_doc_orientation_classify",
         "useDocUnwarping": "use_doc_unwarping",

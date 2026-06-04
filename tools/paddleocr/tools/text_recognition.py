@@ -4,7 +4,13 @@ from typing import Any
 from dify_plugin import Tool
 from dify_plugin.entities.tool import ToolInvokeMessage
 
-from tools.utils import make_paddleocr_api_request, normalize_file_input
+from tools.utils import (
+    build_ocr_options,
+    cleanup_temp_file,
+    get_sdk_client,
+    normalize_file_input,
+    ocr_result_to_legacy_format,
+)
 
 
 class TextRecognitionTool(Tool):
@@ -22,36 +28,39 @@ class TextRecognitionTool(Tool):
             )
         api_url = self.runtime.credentials["text_recognition_api_url"]
 
-        file_payload, file_type = normalize_file_input(
+        # Normalize file input - returns (input_value, is_temp_file, file_type_code)
+        file_input, is_temp_file, file_type_code = normalize_file_input(
             tool_parameters.get("file"), tool_parameters.get("fileType")
         )
 
-        params: dict[str, Any] = {"file": file_payload}
-        if file_type is not None:
-            params["fileType"] = file_type
-        for optional_param_name in [
-            "fileType",
-            "useDocOrientationClassify",
-            "useDocUnwarping",
-            "useTextlineOrientation",
-            "textDetLimitSideLen",
-            "textDetLimitType",
-            "textDetThresh",
-            "textDetBoxThresh",
-            "textDetUnclipRatio",
-            "textRecScoreThresh",
-            "returnWordBox",
-            "visualize",
-        ]:
-            if optional_param_name in tool_parameters and optional_param_name != "fileType":
-                params[optional_param_name] = tool_parameters[optional_param_name]
+        try:
+            # Build OCR options from parameters
+            options = build_ocr_options(tool_parameters)
 
-        result = make_paddleocr_api_request(api_url, params, access_token)
+            # Get SDK client
+            client = get_sdk_client(access_token, api_url)
 
-        all_text = []
-        for item in result.get("result", {}).get("ocrResults", []):
-            text_list = item.get("prunedResult", {}).get("rec_texts")
-            if text_list is not None:
-                all_text.append("\n".join(text_list))
-        yield self.create_text_message("\n\n".join(all_text))
-        yield self.create_json_message(result)
+            # Call SDK
+            if file_input.startswith(("http://", "https://")):
+                result = client.ocr(file_url=file_input, options=options)
+            else:
+                result = client.ocr(file_path=file_input, options=options)
+
+            # Convert result to legacy format
+            legacy_result = ocr_result_to_legacy_format(result)
+
+            # Extract text for output
+            all_text = []
+            for page in result.pages:
+                pruned = page.pruned_result
+                if pruned and "rec_texts" in pruned:
+                    text_list = pruned["rec_texts"]
+                    if text_list is not None:
+                        all_text.append("\n".join(text_list))
+
+            yield self.create_text_message("\n\n".join(all_text))
+            yield self.create_json_message(legacy_result)
+
+        finally:
+            # Clean up temporary file if created
+            cleanup_temp_file(file_input, is_temp_file)

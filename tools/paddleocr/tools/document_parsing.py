@@ -5,8 +5,11 @@ from dify_plugin import Tool
 from dify_plugin.entities.tool import ToolInvokeMessage
 
 from tools.utils import (
+    build_pp_structure_v3_options,
+    cleanup_temp_file,
+    doc_result_to_legacy_format,
     get_markdown_from_result,
-    make_paddleocr_api_request,
+    get_sdk_client,
     normalize_file_input,
     process_images_from_result,
 )
@@ -27,73 +30,50 @@ class DocumentParsingTool(Tool):
             )
         api_url = self.runtime.credentials["document_parsing_api_url"]
 
-        file_payload, file_type = normalize_file_input(
+        # Normalize file input - returns (input_value, is_temp_file, file_type_code)
+        file_input, is_temp_file, file_type_code = normalize_file_input(
             tool_parameters.get("file"), tool_parameters.get("fileType")
         )
 
-        params: dict[str, Any] = {"file": file_payload}
-        if file_type is not None:
-            params["fileType"] = file_type
-        for optional_param_name in [
-            "fileType",
-            "useDocOrientationClassify",
-            "useDocUnwarping",
-            "useTextlineOrientation",
-            "useSealRecognition",
-            "useTableRecognition",
-            "useFormulaRecognition",
-            "useChartRecognition",
-            "useRegionDetection",
-            "formatBlockContent",
-            "layoutThreshold",
-            "layoutNms",
-            "layoutUnclipRatio",
-            "layoutMergeBboxesMode",
-            "textDetLimitSideLen",
-            "textDetLimitType",
-            "textDetThresh",
-            "textDetBoxThresh",
-            "textDetUnclipRatio",
-            "textRecScoreThresh",
-            "sealDetLimitSideLen",
-            "sealDetLimitType",
-            "sealDetThresh",
-            "sealDetBoxThresh",
-            "sealDetUnclipRatio",
-            "sealRecScoreThresh",
-            "useWiredTableCellsTransToHtml",
-            "useWirelessTableCellsTransToHtml",
-            "useTableOrientationClassify",
-            "useOcrResultsWithTableCells",
-            "useE2eWiredTableRecModel",
-            "useE2eWirelessTableRecModel",
-            "markdownIgnoreLabels",
-            "prettifyMarkdown",
-            "showFormulaNumber",
-            "visualize",
-        ]:
-            if optional_param_name in tool_parameters and optional_param_name != "fileType":
-                params[optional_param_name] = tool_parameters[optional_param_name]
+        try:
+            # Build options from parameters
+            options = build_pp_structure_v3_options(tool_parameters)
 
-        # Convert markdownIgnoreLabels from comma-separated string to list
-        if "markdownIgnoreLabels" in params and isinstance(params["markdownIgnoreLabels"], str):
-            params["markdownIgnoreLabels"] = [
-                label.strip()
-                for label in params["markdownIgnoreLabels"].split(",")
-                if label.strip()
-            ]
+            # Get SDK client
+            client = get_sdk_client(access_token, api_url)
 
-        result = make_paddleocr_api_request(api_url, params, access_token)
+            # Call SDK with PP-StructureV3 model
+            if file_input.startswith(("http://", "https://")):
+                result = client.parse_document(
+                    model="PP-StructureV3",
+                    file_url=file_input,
+                    options=options,
+                )
+            else:
+                result = client.parse_document(
+                    model="PP-StructureV3",
+                    file_path=file_input,
+                    options=options,
+                )
 
-        images, image_path_map, failed_images, blob_messages = process_images_from_result(
-            result, self
-        )
+            # Convert result to legacy format
+            legacy_result = doc_result_to_legacy_format(result)
 
-        markdown = get_markdown_from_result(result, image_path_map, failed_images)
+            # Process images
+            images, image_path_map, failed_images, blob_messages = process_images_from_result(
+                legacy_result, self
+            )
 
-        for blob_data, blob_meta in blob_messages:
-            yield self.create_blob_message(blob_data, meta=blob_meta)
+            # Get markdown
+            markdown = get_markdown_from_result(legacy_result, image_path_map, failed_images)
 
-        yield self.create_variable_message("images", images)
-        yield self.create_text_message(markdown)
-        yield self.create_json_message(result)
+            for blob_data, blob_meta in blob_messages:
+                yield self.create_blob_message(blob_data, meta=blob_meta)
+
+            yield self.create_variable_message("images", images)
+            yield self.create_text_message(markdown)
+            yield self.create_json_message(legacy_result)
+
+        finally:
+            # Clean up temporary file if created
+            cleanup_temp_file(file_input, is_temp_file)

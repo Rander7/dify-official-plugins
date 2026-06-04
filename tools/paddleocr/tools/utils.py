@@ -2,13 +2,21 @@ import base64
 import logging
 import os
 import re
+import tempfile
 from typing import Any, List, Optional, Tuple
+from urllib.parse import urlparse
 
-import requests
 from dify_plugin.file.file import File
 from dify_plugin.invocations.file import UploadFileResponse
-
-REQUEST_TIMEOUT = (10, 600)
+from paddleocr._api_client import PaddleOCRClient
+from paddleocr._api_client.models import (
+    DocParsingOptions,
+    Model,
+    OCROptions,
+    PPStructureV3Options,
+    PaddleOCRVLOptions,
+)
+from paddleocr._api_client.results import DocParsingResult, OCRResult
 
 # Pre-compiled regex patterns for performance
 HTML_IMG_PATTERN = re.compile(r'(<img[^>]*src=")([^"]+)(")')
@@ -20,6 +28,27 @@ FAILED_IMG_TAG_TEMPLATE = r'<img[^>]*src="[^"]*{escaped_path}[^"]*"[^>]*>'
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+
+
+def extract_base_url(api_url: str) -> str:
+    """Extract base URL from full API URL.
+
+    The SDK requires a base URL (e.g., https://example.com)
+    but users provide the full API URL (e.g., https://example.com/ocr).
+    This function extracts the base URL by removing the endpoint path.
+
+    Args:
+        api_url: Full API URL
+
+    Returns:
+        Base URL without endpoint path
+    """
+    parsed = urlparse(api_url)
+    # Remove common PaddleOCR endpoints
+    path = parsed.path
+    if path in ("/ocr", "/layout-parsing", "/paddleocr"):
+        path = ""
+    return f"{parsed.scheme}://{parsed.netloc}{path}"
 
 
 def convert_file_type(file_type: str | None) -> int | None:
@@ -39,12 +68,14 @@ def convert_file_type(file_type: str | None) -> int | None:
         return None
 
 
-def normalize_file_input(file_value: Any, file_type: str | None) -> tuple[str, int | None]:
-    """Normalize PaddleOCR file input for API payloads.
+def normalize_file_input(file_value: Any, file_type: str | None) -> Tuple[str, bool, int | None]:
+    """Normalize PaddleOCR file input.
 
-    Uploaded Dify files are converted to base64 content because the PaddleOCR
-    API accepts either a URL or base64-encoded file content in the `file` field.
-    Legacy string values are kept unchanged for URL/base64 compatibility.
+    Returns:
+        A tuple of (input_value, is_temp_file, file_type_code):
+        - input_value: URL, file path (temp or regular), or base64 string
+        - is_temp_file: True if the value is a temporary file path that should be deleted
+        - file_type_code: 0 for PDF, 1 for image, None for auto
     """
     if file_value is None or (isinstance(file_value, str) and file_value == ""):
         raise RuntimeError("File is not provided.")
@@ -53,12 +84,20 @@ def normalize_file_input(file_value: Any, file_type: str | None) -> tuple[str, i
 
     if isinstance(file_value, File):
         encoded_file = base64.b64encode(file_value.blob).decode("utf-8")
-        if explicit_file_type is not None:
-            return encoded_file, explicit_file_type
-        return encoded_file, infer_file_type(file_value)
+        temp_file = base64_to_temp_file(encoded_file, infer_file_extension(file_value))
+        file_type_code = explicit_file_type if explicit_file_type is not None else infer_file_type(file_value)
+        return temp_file, True, file_type_code
 
     if isinstance(file_value, str):
-        return file_value, explicit_file_type
+        # Check if it's a URL
+        if file_value.startswith(("http://", "https://")):
+            return file_value, False, explicit_file_type
+        # Check if it's base64 (data URL or raw)
+        if file_value.startswith("data:") or is_likely_base64(file_value):
+            temp_file = base64_to_temp_file(extract_base64(file_value))
+            return temp_file, True, explicit_file_type
+        # It's a file path
+        return file_value, False, explicit_file_type
 
     raise RuntimeError("File must be a Dify file, URL, or base64-encoded string.")
 
@@ -82,6 +121,21 @@ def infer_file_type(file_value: File) -> int | None:
     return None
 
 
+def infer_file_extension(file_value: File) -> str:
+    mime_type = (file_value.mime_type or "").lower()
+    if mime_type == "application/pdf":
+        return ".pdf"
+    if mime_type.startswith("image/"):
+        ext = mime_type.split("/")[-1]
+        return f".{ext}"
+
+    extension = normalize_extension(file_value.extension)
+    if extension is None:
+        extension = normalize_extension(os.path.splitext(file_value.filename or "")[1])
+
+    return extension if extension else ".png"
+
+
 def normalize_extension(extension: str | None) -> str | None:
     if not extension:
         return None
@@ -89,34 +143,263 @@ def normalize_extension(extension: str | None) -> str | None:
     return extension if extension.startswith(".") else f".{extension}"
 
 
+def extract_base64(data_url: str) -> str:
+    if data_url.startswith("data:"):
+        return data_url.split(",", 1)[1]
+    return data_url
+
+
+def is_likely_base64(s: str) -> bool:
+    if len(s) < 32:
+        return False
+    try:
+        base64.b64decode(s, validate=True)
+        return True
+    except Exception:
+        return False
+
+
+def base64_to_temp_file(base64_str: str, suffix: str = ".png") -> str:
+    """Save base64 string to a temporary file.
+
+    Args:
+        base64_str: Base64 encoded string
+        suffix: File extension suffix
+
+    Returns:
+        Path to the temporary file
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+        f.write(base64.b64decode(base64_str))
+        return f.name
+
+
+def cleanup_temp_file(file_path: str, is_temp: bool) -> None:
+    """Clean up temporary file if it exists and is marked as temporary.
+
+    Args:
+        file_path: Path to the file
+        is_temp: True if the file is a temporary file that should be deleted
+    """
+    if is_temp and file_path and os.path.exists(file_path):
+        try:
+            os.unlink(file_path)
+        except Exception as e:
+            logger.warning(f"Failed to clean up temporary file {file_path}: {e}")
+
+
+def get_sdk_client(access_token: str, api_url: str) -> PaddleOCRClient:
+    """Get PaddleOCR SDK client.
+
+    Args:
+        access_token: AI Studio access token
+        api_url: API URL (full endpoint URL or base URL)
+
+    Returns:
+        PaddleOCRClient instance
+    """
+    base_url = extract_base_url(api_url)
+    return PaddleOCRClient(
+        token=access_token,
+        base_url=base_url,
+        client_platform="dify",
+    )
+
+
+def ocr_result_to_legacy_format(result: OCRResult) -> dict:
+    """Convert SDK OCRResult to legacy API format.
+
+    Args:
+        result: SDK OCRResult
+
+    Returns:
+        Legacy format dict
+    """
+    return {
+        "result": {
+            "ocrResults": [
+                {
+                    "prunedResult": page.pruned_result,
+                    "ocrImageUrl": page.ocr_image_url,
+                }
+                for page in result.pages
+            ]
+        }
+    }
+
+
+def doc_result_to_legacy_format(result: DocParsingResult) -> dict:
+    """Convert SDK DocParsingResult to legacy API format.
+
+    Args:
+        result: SDK DocParsingResult
+
+    Returns:
+        Legacy format dict
+    """
+    return {
+        "result": {
+            "layoutParsingResults": [
+                {
+                    "markdown": {
+                        "text": page.markdown_text,
+                        "images": page.markdown_images,
+                    },
+                    "outputImages": page.output_images,
+                }
+                for page in result.pages
+            ]
+        }
+    }
+
+
+def build_ocr_options(params: dict[str, Any]) -> Optional[OCROptions]:
+    """Build OCROptions from parameters.
+
+    Args:
+        params: Tool parameters
+
+    Returns:
+        OCROptions instance or None
+    """
+    option_map = {
+        "useDocOrientationClassify": "use_doc_orientation_classify",
+        "useDocUnwarping": "use_doc_unwarping",
+        "useTextlineOrientation": "use_textline_orientation",
+        "textDetLimitSideLen": "text_det_limit_side_len",
+        "textDetLimitType": "text_det_limit_type",
+        "textDetThresh": "text_det_thresh",
+        "textDetBoxThresh": "text_det_box_thresh",
+        "textDetUnclipRatio": "text_det_unclip_ratio",
+        "textRecScoreThresh": "text_rec_score_thresh",
+        "visualize": "visualize",
+    }
+
+    options_dict = {}
+    for api_name, option_name in option_map.items():
+        if api_name in params and params[api_name] is not None:
+            options_dict[option_name] = params[api_name]
+
+    return OCROptions(**options_dict) if options_dict else None
+
+
+def build_pp_structure_v3_options(params: dict[str, Any]) -> Optional[PPStructureV3Options]:
+    """Build PPStructureV3Options from parameters.
+
+    Args:
+        params: Tool parameters
+
+    Returns:
+        PPStructureV3Options instance or None
+    """
+    option_map = {
+        "useDocOrientationClassify": "use_doc_orientation_classify",
+        "useDocUnwarping": "use_doc_unwarping",
+        "useTextlineOrientation": "use_textline_orientation",
+        "useSealRecognition": "use_seal_recognition",
+        "useTableRecognition": "use_table_recognition",
+        "useFormulaRecognition": "use_formula_recognition",
+        "useChartRecognition": "use_chart_recognition",
+        "useRegionDetection": "use_region_detection",
+        "formatBlockContent": "format_block_content",
+        "layoutThreshold": "layout_threshold",
+        "layoutNms": "layout_nms",
+        "layoutUnclipRatio": "layout_unclip_ratio",
+        "layoutMergeBboxesMode": "layout_merge_bboxes_mode",
+        "textDetLimitSideLen": "text_det_limit_side_len",
+        "textDetLimitType": "text_det_limit_type",
+        "textDetThresh": "text_det_thresh",
+        "textDetBoxThresh": "text_det_box_thresh",
+        "textDetUnclipRatio": "text_det_unclip_ratio",
+        "textRecScoreThresh": "text_rec_score_thresh",
+        "sealDetLimitSideLen": "seal_det_limit_side_len",
+        "sealDetLimitType": "seal_det_limit_type",
+        "sealDetThresh": "seal_det_thresh",
+        "sealDetBoxThresh": "seal_det_box_thresh",
+        "sealDetUnclipRatio": "seal_det_unclip_ratio",
+        "sealRecScoreThresh": "seal_rec_score_thresh",
+        "useWiredTableCellsTransToHtml": "use_wired_table_cells_trans_to_html",
+        "useWirelessTableCellsTransToHtml": "use_wireless_table_cells_trans_to_html",
+        "useTableOrientationClassify": "use_table_orientation_classify",
+        "useOcrResultsWithTableCells": "use_ocr_results_with_table_cells",
+        "useE2eWiredTableRecModel": "use_e2e_wired_table_rec_model",
+        "useE2eWirelessTableRecModel": "use_e2e_wireless_table_rec_model",
+        "markdownIgnoreLabels": "markdown_ignore_labels",
+        "prettifyMarkdown": "prettify_markdown",
+        "showFormulaNumber": "show_formula_number",
+        "visualize": "visualize",
+    }
+
+    options_dict = {}
+    for api_name, option_name in option_map.items():
+        if api_name in params and params[api_name] is not None:
+            value = params[api_name]
+            # Handle markdownIgnoreLabels conversion
+            if api_name == "markdownIgnoreLabels" and isinstance(value, str):
+                value = [label.strip() for label in value.split(",") if label.strip()]
+            options_dict[option_name] = value
+
+    return PPStructureV3Options(**options_dict) if options_dict else None
+
+
+def build_paddleocr_vl_options(params: dict[str, Any]) -> Optional[PaddleOCRVLOptions]:
+    """Build PaddleOCRVLOptions from parameters.
+
+    Args:
+        params: Tool parameters
+
+    Returns:
+        PaddleOCRVLOptions instance or None
+    """
+    option_map = {
+        "useDocOrientationClassify": "use_doc_orientation_classify",
+        "useDocUnwarping": "use_doc_unwarping",
+        "useLayoutDetection": "use_layout_detection",
+        "useChartRecognition": "use_chart_recognition",
+        "useSealRecognition": "use_seal_recognition",
+        "formatBlockContent": "format_block_content",
+        "layoutThreshold": "layout_threshold",
+        "layoutNms": "layout_nms",
+        "layoutUnclipRatio": "layout_unclip_ratio",
+        "layoutMergeBboxesMode": "layout_merge_bboxes_mode",
+        "layoutShapeMode": "layout_shape_mode",
+        "promptLabel": "prompt_label",
+        "repetitionPenalty": "repetition_penalty",
+        "temperature": "temperature",
+        "topP": "top_p",
+        "minPixels": "min_pixels",
+        "maxPixels": "max_pixels",
+        "maxNewTokens": "max_new_tokens",
+        "mergeLayoutBlocks": "merge_layout_blocks",
+        "markdownIgnoreLabels": "markdown_ignore_labels",
+        "prettifyMarkdown": "prettify_markdown",
+        "showFormulaNumber": "show_formula_number",
+        "restructurePages": "restructure_pages",
+        "mergeTables": "merge_tables",
+        "relevelTitles": "relevel_titles",
+        "visualize": "visualize",
+    }
+
+    options_dict = {}
+    for api_name, option_name in option_map.items():
+        if api_name in params and params[api_name] is not None:
+            value = params[api_name]
+            # Handle promptLabel conversion
+            if api_name == "promptLabel" and value == "undefined":
+                continue
+            # Handle markdownIgnoreLabels conversion
+            if api_name == "markdownIgnoreLabels" and isinstance(value, str):
+                value = [label.strip() for label in value.split(",") if label.strip()]
+            options_dict[option_name] = value
+
+    return PaddleOCRVLOptions(**options_dict) if options_dict else None
+
+
 def extract_image_urls_from_markdown(markdown: str) -> List[str]:
     """Extract image URLs from markdown"""
-    # Match various image URL formats, including relative and absolute paths
     image_pattern = re.compile(r'<img[^>]*src="([^"]*)"[^>]*>', re.IGNORECASE)
     matches = image_pattern.findall(markdown)
     return matches
-
-
-def download_image_from_url(image_url: str) -> bytes:
-    """Download image from URL and return image data and MIME type"""
-    try:
-        logger.debug(f"Downloading image from URL: {image_url}")
-        resp = requests.get(image_url, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-
-        logger.debug(
-            f"Successfully downloaded image from {image_url}, size: {len(resp.content)} bytes"
-        )
-        return resp.content
-    except requests.exceptions.Timeout as e:
-        logger.error(f"Timeout downloading image from {image_url}: {e}")
-        raise RuntimeError(f"Failed to download image from {image_url}: timeout") from e
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Network error downloading image from {image_url}: {e}")
-        raise RuntimeError(f"Failed to download image from {image_url}: network error") from e
-    except Exception as e:
-        logger.error(f"Unexpected error downloading image from {image_url}: {e}")
-        raise RuntimeError(f"Failed to download image from {image_url}: {e}") from e
 
 
 def replace_markdown_image_paths(
@@ -157,7 +440,6 @@ def replace_markdown_image_paths(
     placeholder_count = 0
     for failed_path in failed_images:
         escaped_path = re.escape(failed_path)
-        # Remove entire img tags for failed images using template pattern
         pattern = FAILED_IMG_TAG_TEMPLATE.format(escaped_path=escaped_path)
         original_markdown = markdown
         markdown = re.sub(pattern, "[Image unavailable]", markdown)
@@ -298,68 +580,25 @@ def get_markdown_from_result(
     return "\n\n".join(markdown_text_list)
 
 
-def make_paddleocr_api_request(api_url: str, params: dict, access_token: str) -> dict:
-    try:
-        logger.debug(f"Making PaddleOCR API request to {api_url}")
-        resp = requests.post(
-            api_url,
-            headers={"Client-Platform": "dify", "Authorization": f"token {access_token}"},
-            json=params,
-            timeout=REQUEST_TIMEOUT,
-        )
-        logger.debug(f"PaddleOCR API request completed with status {resp.status_code}")
-    except requests.exceptions.Timeout as e:
-        logger.error(f"PaddleOCR API request timed out: {e}")
-        raise RuntimeError("PaddleOCR API request timed out") from e
-    except requests.exceptions.RequestException as e:
-        logger.error(f"PaddleOCR API request failed (network error): {e}")
-        raise RuntimeError("PaddleOCR API request failed (network error)") from e
+def download_image_from_url(image_url: str) -> bytes:
+    """Download image from URL and return image data and MIME type"""
+    import requests
 
     try:
+        logger.debug(f"Downloading image from URL: {image_url}")
+        resp = requests.get(image_url, timeout=(10, 600))
         resp.raise_for_status()
-    except requests.exceptions.HTTPError as e:
-        status = resp.status_code
 
-        if status in (400, 422):
-            try:
-                result = resp.json()
-                err_code = result.get("errorCode")
-                err_msg = result.get("errorMsg")
-            except ValueError:
-                err_code = None
-                err_msg = resp.text or "Bad Request"
-
-            logger.error(f"PaddleOCR API returned {status}: code={err_code}, msg={err_msg}")
-            raise RuntimeError(
-                f"PaddleOCR API returned {status}: code={err_code}, msg={err_msg}"
-            ) from e
-
-        if status in (401, 403):
-            logger.error(f"PaddleOCR API authorization failed ({status})")
-            raise RuntimeError(f"PaddleOCR API authorization failed ({status})") from e
-
-        if status == 429:
-            logger.warning("PaddleOCR API rate limit exceeded (429)")
-            raise RuntimeError("PaddleOCR API rate limit exceeded (429)") from e
-
-        if status in (500, 502, 503, 504):
-            logger.error(f"PaddleOCR API service unavailable ({status})")
-            raise RuntimeError(f"PaddleOCR API service unavailable ({status})") from e
-
-        logger.error(f"PaddleOCR API returned HTTP {status}: {resp.text}")
-        raise RuntimeError(f"PaddleOCR API returned HTTP {status}: {resp.text}") from e
-
-    try:
-        result = resp.json()
-        logger.debug("Successfully parsed PaddleOCR API response")
-    except ValueError as e:
-        logger.error(f"Failed to decode JSON response from PaddleOCR API: {resp.text}")
-        raise RuntimeError(f"Failed to decode JSON response from PaddleOCR API: {resp.text}") from e
-
-    err_code = result.get("errorCode")
-    err_msg = result.get("errorMsg")
-    if err_code != 0:
-        logger.error(f"PaddleOCR API returned error: code={err_code}, msg={err_msg}")
-        raise RuntimeError(f"PaddleOCR API returned error: code={err_code}, msg={err_msg}")
-
-    return result
+        logger.debug(
+            f"Successfully downloaded image from {image_url}, size: {len(resp.content)} bytes"
+        )
+        return resp.content
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Timeout downloading image from {image_url}: {e}")
+        raise RuntimeError(f"Failed to download image from {image_url}: timeout") from e
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Network error downloading image from {image_url}: {e}")
+        raise RuntimeError(f"Failed to download image from {image_url}: network error") from e
+    except Exception as e:
+        logger.error(f"Unexpected error downloading image from {image_url}: {e}")
+        raise RuntimeError(f"Failed to download image from {image_url}: {e}") from e

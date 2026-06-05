@@ -1,13 +1,13 @@
 identity:
-  author: “langgenius”
-  name: “paddleocr”
+  author: "langgenius"
+  name: "paddleocr"
   label:
-    en_US: “PaddleOCR”
-    zh_Hans: “PaddleOCR”
+    en_US: "PaddleOCR"
+    zh_Hans: "PaddleOCR"
   description:
-    en_US: “PaddleOCR plugin provides several capabilities from PaddleOCR, including text recognition, document parsing, and more”
-    zh_Hans: “PaddleOCR 插件提供 PaddleOCR 的多项能力，包括文字识别、文档解析等”
-  icon: “icon.png”
+    en_US: "PaddleOCR plugin provides several capabilities from PaddleOCR, including text recognition, document parsing, and more"
+    zh_Hans: "PaddleOCR 插件提供 PaddleOCR 的多项能力，包括文字识别、文档解析等"
+  icon: "icon.png"
 
 tags:
     - productivity

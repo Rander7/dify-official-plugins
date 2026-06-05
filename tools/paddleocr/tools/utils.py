@@ -1,7 +1,9 @@
 import base64
+import json
 import logging
 import os
 import re
+import time
 import tempfile
 from typing import Any, List, Optional, Tuple
 from urllib.parse import urlparse
@@ -210,104 +212,6 @@ def cleanup_temp_file(file_path: str, is_temp: bool) -> None:
             logger.warning(f"Failed to clean up temporary file {file_path}: {e}")
 
 
-def get_sdk_client(access_token: str, base_url: str | None = None) -> Any:
-    """Get PaddleOCR SDK client.
-
-    Args:
-        access_token: AI Studio access token
-        base_url: Base URL (optional, uses SDK default if not provided)
-
-    Returns:
-        PaddleOCRClient instance
-    """
-    from paddleocr import PaddleOCRClient
-
-    # If base_url is provided, extract it (in case user passed full API URL)
-    if base_url:
-        base_url = extract_base_url(base_url)
-
-    return PaddleOCRClient(
-        token=access_token,
-        base_url=base_url,
-        client_platform="dify",
-    )
-
-
-def build_ocr_options(params: dict[str, Any]) -> Any:
-    """Build OCROptions from parameters using dynamic conversion.
-
-    Args:
-        params: Tool parameters
-
-    Returns:
-        OCROptions instance or None
-    """
-    from paddleocr import OCROptions
-
-    options_dict = {}
-    for api_name, value in params.items():
-        if value is None:
-            continue
-        # Convert camelCase to snake_case
-        option_name = camel_to_snake(api_name)
-        options_dict[option_name] = value
-
-    return OCROptions(**options_dict) if options_dict else None
-
-
-def build_pp_structure_v3_options(params: dict[str, Any]) -> Any:
-    """Build PPStructureV3Options from parameters using dynamic conversion.
-
-    Args:
-        params: Tool parameters
-
-    Returns:
-        PPStructureV3Options instance or None
-    """
-    from paddleocr import PPStructureV3Options
-
-    options_dict = {}
-    for api_name, value in params.items():
-        if value is None:
-            continue
-        # Convert camelCase to snake_case
-        option_name = camel_to_snake(api_name)
-        # Handle markdownIgnoreLabels conversion
-        if api_name == "markdownIgnoreLabels" and isinstance(value, str):
-            value = [label.strip() for label in value.split(",") if label.strip()]
-        options_dict[option_name] = value
-
-    return PPStructureV3Options(**options_dict) if options_dict else None
-
-
-def build_paddleocr_vl_options(params: dict[str, Any]) -> Any:
-    """Build PaddleOCRVLOptions from parameters using dynamic conversion.
-
-    Args:
-        params: Tool parameters
-
-    Returns:
-        PaddleOCRVLOptions instance or None
-    """
-    from paddleocr import PaddleOCRVLOptions
-
-    options_dict = {}
-    for api_name, value in params.items():
-        if value is None:
-            continue
-        # Handle promptLabel conversion - skip if "undefined"
-        if api_name == "promptLabel" and value == "undefined":
-            continue
-        # Convert camelCase to snake_case
-        option_name = camel_to_snake(api_name)
-        # Handle markdownIgnoreLabels conversion
-        if api_name == "markdownIgnoreLabels" and isinstance(value, str):
-            value = [label.strip() for label in value.split(",") if label.strip()]
-        options_dict[option_name] = value
-
-    return PaddleOCRVLOptions(**options_dict) if options_dict else None
-
-
 def extract_image_urls_from_markdown(markdown: str) -> List[str]:
     """Extract image URLs from markdown"""
     image_pattern = re.compile(r'<img[^>]*src="([^"]*)"[^>]*>', re.IGNORECASE)
@@ -506,3 +410,376 @@ def download_image_from_url(image_url: str) -> bytes:
     except Exception as e:
         logger.error(f"Unexpected error downloading image from {image_url}: {e}")
         raise RuntimeError(f"Failed to download image from {image_url}: {e}") from e
+
+
+# ==================== HTTP Async Job API Implementation ====================
+
+DEFAULT_BASE_URL = "https://paddleocr.aistudio-app.com"
+API_PATH = "/api/v2/ocr/jobs"
+DEFAULT_REQUEST_TIMEOUT = 300.0
+DEFAULT_POLL_TIMEOUT = 600.0
+DEFAULT_INITIAL_INTERVAL = 3.0
+DEFAULT_MULTIPLIER = 1.5
+DEFAULT_MAX_INTERVAL = 15.0
+
+
+def get_sdk_client(access_token: str, base_url: str | None = None) -> dict[str, Any]:
+    """Get PaddleOCR API client configuration.
+
+    Args:
+        access_token: AI Studio access token
+        base_url: Base URL (optional, uses SDK default if not provided)
+
+    Returns:
+        Configuration dict with token, base_url, headers
+    """
+    # If base_url is provided, extract it (in case user passed full API URL)
+    if base_url:
+        base_url = extract_base_url(base_url)
+    else:
+        base_url = DEFAULT_BASE_URL
+
+    return {
+        "token": access_token,
+        "base_url": base_url.rstrip("/"),
+        "headers": {
+            "Authorization": f"Bearer {access_token}",
+            "Client-Platform": "dify",
+        },
+    }
+
+
+def build_ocr_options(params: dict[str, Any]) -> dict[str, Any]:
+    """Build OCR options dict from parameters using dynamic conversion.
+
+    Args:
+        params: Tool parameters
+
+    Returns:
+        Options dict with snake_case keys
+    """
+    options_dict = {}
+    for api_name, value in params.items():
+        if value is None:
+            continue
+        # Convert camelCase to snake_case
+        option_name = camel_to_snake(api_name)
+        options_dict[option_name] = value
+    return options_dict
+
+
+def build_pp_structure_v3_options(params: dict[str, Any]) -> dict[str, Any]:
+    """Build PPStructureV3 options dict from parameters using dynamic conversion.
+
+    Args:
+        params: Tool parameters
+
+    Returns:
+        Options dict with snake_case keys
+    """
+    options_dict = {}
+    for api_name, value in params.items():
+        if value is None:
+            continue
+        # Convert camelCase to snake_case
+        option_name = camel_to_snake(api_name)
+        # Handle markdownIgnoreLabels conversion
+        if api_name == "markdownIgnoreLabels" and isinstance(value, str):
+            value = [label.strip() for label in value.split(",") if label.strip()]
+        options_dict[option_name] = value
+    return options_dict
+
+
+def build_paddleocr_vl_options(params: dict[str, Any]) -> dict[str, Any]:
+    """Build PaddleOCRVLOptions dict from parameters using dynamic conversion.
+
+    Args:
+        params: Tool parameters
+
+    Returns:
+        Options dict with snake_case keys
+    """
+    options_dict = {}
+    for api_name, value in params.items():
+        if value is None:
+            continue
+        # Handle promptLabel conversion - skip if "undefined"
+        if api_name == "promptLabel" and value == "undefined":
+            continue
+        # Convert camelCase to snake_case
+        option_name = camel_to_snake(api_name)
+        # Handle markdownIgnoreLabels conversion
+        if api_name == "markdownIgnoreLabels" and isinstance(value, str):
+            value = [label.strip() for label in value.split(",") if label.strip()]
+        options_dict[option_name] = value
+    return options_dict
+
+
+def _submit_job(
+    model: str,
+    file_url: str | None,
+    file_path: str | None,
+    options: dict[str, Any],
+    base_url: str,
+    headers: dict[str, str],
+) -> str:
+    """Submit job and return job_id.
+
+    Args:
+        model: Model name (e.g., "PP-OCRv5", "PP-StructureV3", "PaddleOCR-VL-1.6")
+        file_url: URL of the file (if using URL input)
+        file_path: Path to the file (if using file input)
+        options: Optional payload parameters
+        base_url: Base API URL
+        headers: Request headers
+
+    Returns:
+        job_id string
+
+    Raises:
+        RuntimeError: If submission fails
+    """
+    import requests
+
+    jobs_url = f"{base_url}{API_PATH}"
+
+    try:
+        if file_url:
+            # Submit with URL
+            body = {
+                "fileUrl": file_url,
+                "model": model,
+                "optionalPayload": options,
+            }
+            resp = requests.post(jobs_url, json=body, headers=headers, timeout=DEFAULT_REQUEST_TIMEOUT)
+        else:
+            # Submit with file
+            data = {
+                "model": model,
+                "optionalPayload": json.dumps(options),
+            }
+            with open(file_path, "rb") as f:
+                resp = requests.post(
+                    jobs_url, data=data, files={"file": f}, headers=headers, timeout=DEFAULT_REQUEST_TIMEOUT
+                )
+    except requests.Timeout as e:
+        raise RuntimeError(f"Request timed out: {e}") from e
+    except requests.ConnectionError as e:
+        raise RuntimeError(f"Connection failed: {e}") from e
+
+    if not 200 <= resp.status_code < 300:
+        try:
+            payload = resp.json()
+            msg = payload.get("msg") or payload.get("message") or payload.get("error") or resp.text
+        except ValueError:
+            msg = resp.text
+        raise RuntimeError(f"Job submission failed (HTTP {resp.status_code}): {msg}")
+
+    try:
+        payload = resp.json()
+        job_id = payload.get("data", {}).get("jobId") or payload.get("jobId")
+        if not job_id:
+            raise RuntimeError(f"Job ID not found in response: {payload}")
+        return job_id
+    except (ValueError, KeyError) as e:
+        raise RuntimeError(f"Failed to parse job submission response: {e}") from e
+
+
+def _poll_job(
+    job_id: str,
+    base_url: str,
+    headers: dict[str, str],
+    max_wait_time: float = DEFAULT_POLL_TIMEOUT,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Poll job until done, return (jsonl_data, status_data).
+
+    Args:
+        job_id: Job ID
+        base_url: Base API URL
+        headers: Request headers
+        max_wait_time: Maximum wait time in seconds
+
+    Returns:
+        Tuple of (jsonl_data list, status_data dict)
+
+    Raises:
+        RuntimeError: If polling fails or job fails
+    """
+    import requests
+
+    jobs_url = f"{base_url}{API_PATH}"
+    status_url = f"{jobs_url}/{job_id}"
+
+    interval = DEFAULT_INITIAL_INTERVAL
+    start = time.monotonic()
+    deadline = start + max_wait_time
+
+    while True:
+        now = time.monotonic()
+        if now >= deadline:
+            raise RuntimeError(f"Job {job_id} timed out after {max_wait_time:.1f} seconds")
+
+        try:
+            resp = requests.get(status_url, headers=headers, timeout=DEFAULT_REQUEST_TIMEOUT)
+        except requests.Timeout as e:
+            raise RuntimeError(f"Request timed out: {e}") from e
+        except requests.ConnectionError as e:
+            raise RuntimeError(f"Connection failed: {e}") from e
+
+        if not 200 <= resp.status_code < 300:
+            try:
+                payload = resp.json()
+                msg = payload.get("msg") or payload.get("message") or payload.get("error") or resp.text
+            except ValueError:
+                msg = resp.text
+            raise RuntimeError(f"Poll failed (HTTP {resp.status_code}): {msg}")
+
+        try:
+            data = resp.json()
+            state = data.get("data", {}).get("state") or data.get("state")
+        except (ValueError, KeyError) as e:
+            raise RuntimeError(f"Failed to parse poll response: {e}") from e
+
+        if state == "done":
+            # Get result URL
+            result_json_url = data.get("data", {}).get("resultJsonUrl") or data.get("resultJsonUrl")
+            if not result_json_url:
+                raise RuntimeError(f"Result URL not found in response: {data}")
+
+            # Fetch JSONL result
+            try:
+                resp = requests.get(result_json_url, timeout=DEFAULT_REQUEST_TIMEOUT)
+                resp.raise_for_status()
+            except requests.Timeout as e:
+                raise RuntimeError(f"Result download timed out: {e}") from e
+            except requests.ConnectionError as e:
+                raise RuntimeError(f"Result download failed: {e}") from e
+
+            # Parse JSONL
+            lines = resp.text.strip().split("\n")
+            jsonl_data = []
+            for line in lines:
+                line = line.strip()
+                if line:
+                    try:
+                        jsonl_data.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        raise RuntimeError(f"Malformed JSONL result: {e}") from e
+
+            return jsonl_data, data
+
+        if state == "failed":
+            error_msg = data.get("data", {}).get("errorMsg") or data.get("errorMsg") or "Unknown error"
+            raise RuntimeError(f"Job {job_id} failed: {error_msg}")
+
+        # Continue polling
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise RuntimeError(f"Job {job_id} timed out after {max_wait_time:.1f} seconds")
+
+        sleep_time = min(interval, remaining)
+        time.sleep(sleep_time)
+        interval = min(interval * DEFAULT_MULTIPLIER, DEFAULT_MAX_INTERVAL)
+
+
+def _parse_ocr_result(job_id: str, jsonl_data: list[dict[str, Any]]) -> dict[str, Any]:
+    """Parse OCR result into compatible format.
+
+    Args:
+        job_id: Job ID
+        jsonl_data: JSONL data list
+
+    Returns:
+        Dict with job_id and pages list
+
+    Raises:
+        RuntimeError: If parsing fails
+    """
+    try:
+        pages = []
+        for line_obj in jsonl_data:
+            result = line_obj["result"]
+            for item in result["ocrResults"]:
+                pages.append(
+                    {
+                        "pruned_result": item["prunedResult"],
+                        "ocr_image_url": item.get("ocrImage"),
+                    }
+                )
+        return {
+            "job_id": job_id,
+            "pages": pages,
+        }
+    except (KeyError, TypeError) as e:
+        raise RuntimeError(f"Malformed OCR result payload: {e}") from e
+
+
+def _parse_doc_parsing_result(job_id: str, jsonl_data: list[dict[str, Any]]) -> dict[str, Any]:
+    """Parse doc parsing result into compatible format.
+
+    Args:
+        job_id: Job ID
+        jsonl_data: JSONL data list
+
+    Returns:
+        Dict with job_id and pages list
+
+    Raises:
+        RuntimeError: If parsing fails
+    """
+    try:
+        pages = []
+        for line_obj in jsonl_data:
+            result = line_obj["result"]
+            for item in result["layoutParsingResults"]:
+                markdown = item["markdown"]
+                pages.append(
+                    {
+                        "markdown_text": markdown["text"],
+                        "markdown_images": markdown.get("images", {}),
+                        "output_images": item.get("outputImages", {}),
+                    }
+                )
+        return {
+            "job_id": job_id,
+            "pages": pages,
+        }
+    except (KeyError, TypeError) as e:
+        raise RuntimeError(f"Malformed document parsing result payload: {e}") from e
+
+
+def call_paddleocr_api(
+    model: str,
+    file_url: str | None,
+    file_path: str | None,
+    options: dict[str, Any],
+    client_config: dict[str, Any],
+    is_document_parsing: bool = False,
+) -> dict[str, Any]:
+    """Call PaddleOCR API using async job pattern.
+
+    Args:
+        model: Model name (e.g., "PP-OCRv5", "PP-StructureV3", "PaddleOCR-VL-1.6")
+        file_url: URL of the file (if using URL input)
+        file_path: Path to the file (if using file input)
+        options: Optional payload parameters
+        client_config: Client config from get_sdk_client()
+        is_document_parsing: True for doc parsing, False for OCR
+
+    Returns:
+        Parsed result dict with job_id and pages
+
+    Raises:
+        RuntimeError: If API call fails
+    """
+    job_id = _submit_job(
+        model, file_url, file_path, options, client_config["base_url"], client_config["headers"]
+    )
+    jsonl_data, status_data = _poll_job(
+        job_id, client_config["base_url"], client_config["headers"]
+    )
+
+    if is_document_parsing:
+        return _parse_doc_parsing_result(job_id, jsonl_data)
+    else:
+        return _parse_ocr_result(job_id, jsonl_data)

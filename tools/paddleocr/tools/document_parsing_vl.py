@@ -6,6 +6,7 @@ from dify_plugin.entities.tool import ToolInvokeMessage
 
 from tools.utils import (
     build_paddleocr_vl_options,
+    call_paddleocr_api,
     cleanup_temp_file,
     get_sdk_client,
     normalize_file_input,
@@ -33,31 +34,37 @@ class DocumentParsingVlTool(Tool):
             # Build options from parameters
             options = build_paddleocr_vl_options(tool_parameters)
 
-            # Get SDK client
-            client = get_sdk_client(access_token, base_url)
+            # Get API client config
+            client_config = get_sdk_client(access_token, base_url)
 
-            # Call SDK with PaddleOCR-VL-1.6 model
+            # Call API with PaddleOCR-VL-1.6 model
             if file_input.startswith(("http://", "https://")):
-                result = client.parse_document(
+                result = call_paddleocr_api(
                     model="PaddleOCR-VL-1.6",
                     file_url=file_input,
+                    file_path=None,
                     options=options,
+                    client_config=client_config,
+                    is_document_parsing=True,
                 )
             else:
-                result = client.parse_document(
+                result = call_paddleocr_api(
                     model="PaddleOCR-VL-1.6",
+                    file_url=None,
                     file_path=file_input,
                     options=options,
+                    client_config=client_config,
+                    is_document_parsing=True,
                 )
 
-            # Process images from SDK result
+            # Process images from result
             images = []
             image_path_map = {}
             failed_images = []
 
-            for page in result.pages:
-                if page.markdown_images:
-                    image_dict = page.markdown_images
+            for page in result["pages"]:
+                if page["markdown_images"]:
+                    image_dict = page["markdown_images"]
                     if image_dict:
                         for image_path, image_url in image_dict.items():
                             if image_path in image_path_map:
@@ -79,8 +86,8 @@ class DocumentParsingVlTool(Tool):
 
             # Build markdown with image replacement
             markdown_text_list = []
-            for page in result.pages:
-                markdown_text = page.markdown_text
+            for page in result["pages"]:
+                markdown_text = page["markdown_text"]
                 if markdown_text is not None:
                     # Replace image paths with uploaded URLs
                     for image_path, upload_response in image_path_map.items():
@@ -98,16 +105,16 @@ class DocumentParsingVlTool(Tool):
 
             yield self.create_text_message("\n\n".join(markdown_text_list))
 
-            # Return raw SDK result as JSON
+            # Return raw result as JSON
             yield self.create_json_message({
-                "job_id": result.job_id,
+                "job_id": result["job_id"],
                 "pages": [
                     {
-                        "markdown_text": page.markdown_text,
-                        "markdown_images": page.markdown_images,
-                        "output_images": page.output_images,
+                        "markdown_text": page["markdown_text"],
+                        "markdown_images": page["markdown_images"],
+                        "output_images": page["output_images"],
                     }
-                    for page in result.pages
+                    for page in result["pages"]
                 ]
             })
 

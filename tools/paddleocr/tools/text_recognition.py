@@ -6,6 +6,7 @@ from dify_plugin.entities.tool import ToolInvokeMessage
 
 from tools.utils import (
     build_ocr_options,
+    call_paddleocr_api,
     cleanup_temp_file,
     get_sdk_client,
     normalize_file_input,
@@ -33,19 +34,33 @@ class TextRecognitionTool(Tool):
             # Build OCR options from parameters
             options = build_ocr_options(tool_parameters)
 
-            # Get SDK client
-            client = get_sdk_client(access_token, base_url)
+            # Get API client config
+            client_config = get_sdk_client(access_token, base_url)
 
-            # Call SDK
+            # Call API
             if file_input.startswith(("http://", "https://")):
-                result = client.ocr(file_url=file_input, options=options)
+                result = call_paddleocr_api(
+                    model="PP-OCRv5",
+                    file_url=file_input,
+                    file_path=None,
+                    options=options,
+                    client_config=client_config,
+                    is_document_parsing=False,
+                )
             else:
-                result = client.ocr(file_path=file_input, options=options)
+                result = call_paddleocr_api(
+                    model="PP-OCRv5",
+                    file_url=None,
+                    file_path=file_input,
+                    options=options,
+                    client_config=client_config,
+                    is_document_parsing=False,
+                )
 
             # Extract text for output
             all_text = []
-            for page in result.pages:
-                pruned = page.pruned_result
+            for page in result["pages"]:
+                pruned = page["pruned_result"]
                 if pruned and "rec_texts" in pruned:
                     text_list = pruned["rec_texts"]
                     if text_list is not None:
@@ -53,15 +68,15 @@ class TextRecognitionTool(Tool):
 
             yield self.create_text_message("\n\n".join(all_text))
 
-            # Return raw SDK result as JSON
+            # Return raw result as JSON
             yield self.create_json_message({
-                "job_id": result.job_id,
+                "job_id": result["job_id"],
                 "pages": [
                     {
-                        "pruned_result": page.pruned_result,
-                        "ocr_image_url": page.ocr_image_url,
+                        "pruned_result": page["pruned_result"],
+                        "ocr_image_url": page["ocr_image_url"],
                     }
-                    for page in result.pages
+                    for page in result["pages"]
                 ]
             })
 

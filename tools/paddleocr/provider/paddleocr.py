@@ -6,7 +6,7 @@ from dify_plugin.errors.tool import ToolProviderCredentialValidationError
 from tools.document_parsing import DocumentParsingTool
 from tools.document_parsing_vl import DocumentParsingVlTool
 from tools.text_recognition import TextRecognitionTool
-from tools.utils import get_sdk_client
+from tools.utils import call_paddleocr_api, get_sdk_client
 
 
 class PaddleocrProvider(ToolProvider):
@@ -23,26 +23,19 @@ class PaddleocrProvider(ToolProvider):
         test_file = "https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/general_ocr_002.png"
 
         try:
-            client = get_sdk_client(
+            client_config = get_sdk_client(
                 access_token=credentials["aistudio_access_token"],
                 base_url=base_url,
             )
-            client.ocr(file_url=test_file)
+            call_paddleocr_api(
+                model="PP-OCRv5",
+                file_url=test_file,
+                file_path=None,
+                options={},
+                client_config=client_config,
+                is_document_parsing=False,
+            )
         except Exception as e:
-            # Check for specific PaddleOCR error types
-            try:
-                from paddleocr import AuthError, PaddleOCRAPIError
-
-                if isinstance(e, AuthError):
-                    raise ToolProviderCredentialValidationError(
-                        f"Authentication failed: {e}"
-                    ) from e
-                if isinstance(e, PaddleOCRAPIError):
-                    raise ToolProviderCredentialValidationError(
-                        f"PaddleOCR API error: {e}"
-                    ) from e
-            except ImportError:
-                pass
             raise ToolProviderCredentialValidationError(
                 f"Validation failed: {e}"
             ) from e

@@ -8,15 +8,25 @@ import yaml
 
 # Mock paddleocr module before any imports
 mock_paddleocr = MagicMock()
+
+# Mock public API classes
+mock_paddleocr.PaddleOCRClient = MagicMock
+mock_paddleocr.OCROptions = lambda **kw: MagicMock()
+mock_paddleocr.PPStructureV3Options = lambda **kw: MagicMock()
+mock_paddleocr.PaddleOCRVLOptions = lambda **kw: MagicMock()
+mock_paddleocr.AuthError = Exception
+mock_paddleocr.PaddleOCRAPIError = Exception
+
+# Mock internal modules for backward compatibility
 mock_paddleocr._api_client = MagicMock()
-mock_paddleocr._api_client.PaddleOCRClient = MagicMock
+mock_paddleocr._api_client.PaddleOCRClient = mock_paddleocr.PaddleOCRClient
 mock_paddleocr._api_client.models = MagicMock()
-mock_paddleocr._api_client.models.OCROptions = lambda **kw: MagicMock()
-mock_paddleocr._api_client.models.PPStructureV3Options = lambda **kw: MagicMock()
-mock_paddleocr._api_client.models.PaddleOCRVLOptions = lambda **kw: MagicMock()
+mock_paddleocr._api_client.models.OCROptions = mock_paddleocr.OCROptions
+mock_paddleocr._api_client.models.PPStructureV3Options = mock_paddleocr.PPStructureV3Options
+mock_paddleocr._api_client.models.PaddleOCRVLOptions = mock_paddleocr.PaddleOCRVLOptions
 mock_paddleocr._api_client.errors = MagicMock()
-mock_paddleocr._api_client.errors.AuthError = Exception
-mock_paddleocr._api_client.errors.PaddleOCRAPIError = Exception
+mock_paddleocr._api_client.errors.AuthError = mock_paddleocr.AuthError
+mock_paddleocr._api_client.errors.PaddleOCRAPIError = mock_paddleocr.PaddleOCRAPIError
 
 sys.modules["paddleocr"] = mock_paddleocr
 sys.modules["paddleocr._api_client"] = mock_paddleocr._api_client

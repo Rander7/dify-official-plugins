@@ -9,7 +9,6 @@ from tools.utils import (
     cleanup_temp_file,
     get_sdk_client,
     normalize_file_input,
-    ocr_result_to_legacy_format,
 )
 
 
@@ -22,11 +21,8 @@ class TextRecognitionTool(Tool):
             )
         access_token = self.runtime.credentials["aistudio_access_token"]
 
-        if "text_recognition_api_url" not in self.runtime.credentials:
-            raise RuntimeError(
-                "The text recognition API URL is not configured or invalid. Please provide it in the plugin settings."
-            )
-        api_url = self.runtime.credentials["text_recognition_api_url"]
+        # Get base_url (optional, uses SDK default if not provided)
+        base_url = self.runtime.credentials.get("base_url")
 
         # Normalize file input - returns (input_value, is_temp_file, file_type_code)
         file_input, is_temp_file, file_type_code = normalize_file_input(
@@ -38,16 +34,13 @@ class TextRecognitionTool(Tool):
             options = build_ocr_options(tool_parameters)
 
             # Get SDK client
-            client = get_sdk_client(access_token, api_url)
+            client = get_sdk_client(access_token, base_url)
 
             # Call SDK
             if file_input.startswith(("http://", "https://")):
                 result = client.ocr(file_url=file_input, options=options)
             else:
                 result = client.ocr(file_path=file_input, options=options)
-
-            # Convert result to legacy format
-            legacy_result = ocr_result_to_legacy_format(result)
 
             # Extract text for output
             all_text = []
@@ -59,7 +52,18 @@ class TextRecognitionTool(Tool):
                         all_text.append("\n".join(text_list))
 
             yield self.create_text_message("\n\n".join(all_text))
-            yield self.create_json_message(legacy_result)
+
+            # Return raw SDK result as JSON
+            yield self.create_json_message({
+                "job_id": result.job_id,
+                "pages": [
+                    {
+                        "pruned_result": page.pruned_result,
+                        "ocr_image_url": page.ocr_image_url,
+                    }
+                    for page in result.pages
+                ]
+            })
 
         finally:
             # Clean up temporary file if created

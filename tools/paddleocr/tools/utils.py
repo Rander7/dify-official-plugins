@@ -11,14 +11,27 @@ from dify_plugin.invocations.file import UploadFileResponse
 
 # Pre-compiled regex patterns for performance
 HTML_IMG_PATTERN = re.compile(r'(<img[^>]*src=")([^"]+)(")')
-
-# Template for failed image replacement pattern
 FAILED_IMG_TAG_TEMPLATE = r'<img[^>]*src="[^"]*{escaped_path}[^"]*"[^>]*>'
 
 
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+
+
+def camel_to_snake(name: str) -> str:
+    """Convert camelCase or PascalCase to snake_case.
+
+    Args:
+        name: camelCase or PascalCase string
+
+    Returns:
+        snake_case string
+    """
+    # Handle camelCase
+    s1 = re.sub('(.)([A-Z][a-z]+)', r'\1_\2', name)
+    # Handle PascalCase
+    return re.sub('([a-z0-9])([A-Z])', r'\1_\2', s1).lower()
 
 
 def extract_base_url(api_url: str) -> str:
@@ -36,8 +49,8 @@ def extract_base_url(api_url: str) -> str:
     """
     parsed = urlparse(api_url)
     # Remove common PaddleOCR endpoints
-    path = parsed.path
-    if path in ("/ocr", "/layout-parsing", "/paddleocr"):
+    path = parsed.path.rstrip("/")
+    if path in ("", "/ocr", "/layout-parsing", "/paddleocr"):
         path = ""
     return f"{parsed.scheme}://{parsed.netloc}{path}"
 
@@ -55,7 +68,7 @@ def convert_file_type(file_type: str | None) -> int | None:
         return 0
     elif file_type == "image":
         return 1
-    else:  # "auto" or None
+    else:
         return None
 
 
@@ -83,11 +96,14 @@ def normalize_file_input(file_value: Any, file_type: str | None) -> Tuple[str, b
         # Check if it's a URL
         if file_value.startswith(("http://", "https://")):
             return file_value, False, explicit_file_type
+        # Check if it's a file path (AI reviewer suggestion: check file path before base64 validation)
+        if os.path.exists(file_value):
+            return file_value, False, explicit_file_type
         # Check if it's base64 (data URL or raw)
         if file_value.startswith("data:") or is_likely_base64(file_value):
             temp_file = base64_to_temp_file(extract_base64(file_value))
             return temp_file, True, explicit_file_type
-        # It's a file path
+        # It's a file path (doesn't exist, but could be relative path)
         return file_value, False, explicit_file_type
 
     raise RuntimeError("File must be a Dify file, URL, or base64-encoded string.")
@@ -165,6 +181,21 @@ def base64_to_temp_file(base64_str: str, suffix: str = ".png") -> str:
         return f.name
 
 
+def bytes_to_temp_file(data: bytes, suffix: str = ".png") -> str:
+    """Save bytes directly to a temporary file (AI reviewer suggestion).
+
+    Args:
+        data: Raw bytes data
+        suffix: File extension suffix
+
+    Returns:
+        Path to the temporary file
+    """
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+        f.write(data)
+        return f.name
+
+
 def cleanup_temp_file(file_path: str, is_temp: bool) -> None:
     """Clean up temporary file if it exists and is marked as temporary.
 
@@ -179,19 +210,22 @@ def cleanup_temp_file(file_path: str, is_temp: bool) -> None:
             logger.warning(f"Failed to clean up temporary file {file_path}: {e}")
 
 
-def get_sdk_client(access_token: str, api_url: str) -> Any:
+def get_sdk_client(access_token: str, base_url: str | None = None) -> Any:
     """Get PaddleOCR SDK client.
 
     Args:
         access_token: AI Studio access token
-        api_url: API URL (full endpoint URL or base URL)
+        base_url: Base URL (optional, uses SDK default if not provided)
 
     Returns:
         PaddleOCRClient instance
     """
-    from paddleocr._api_client import PaddleOCRClient
+    from paddleocr import PaddleOCRClient
 
-    base_url = extract_base_url(api_url)
+    # If base_url is provided, extract it (in case user passed full API URL)
+    if base_url:
+        base_url = extract_base_url(base_url)
+
     return PaddleOCRClient(
         token=access_token,
         base_url=base_url,
@@ -199,55 +233,8 @@ def get_sdk_client(access_token: str, api_url: str) -> Any:
     )
 
 
-def ocr_result_to_legacy_format(result: Any) -> dict:
-    """Convert SDK OCRResult to legacy API format.
-
-    Args:
-        result: SDK OCRResult
-
-    Returns:
-        Legacy format dict
-    """
-    return {
-        "result": {
-            "ocrResults": [
-                {
-                    "prunedResult": page.pruned_result,
-                    "ocrImageUrl": page.ocr_image_url,
-                }
-                for page in result.pages
-            ]
-        }
-    }
-
-
-def doc_result_to_legacy_format(result: Any) -> dict:
-    """Convert SDK DocParsingResult to legacy API format.
-
-    Args:
-        result: SDK DocParsingResult
-
-    Returns:
-        Legacy format dict
-    """
-    return {
-        "result": {
-            "layoutParsingResults": [
-                {
-                    "markdown": {
-                        "text": page.markdown_text,
-                        "images": page.markdown_images,
-                    },
-                    "outputImages": page.output_images,
-                }
-                for page in result.pages
-            ]
-        }
-    }
-
-
 def build_ocr_options(params: dict[str, Any]) -> Any:
-    """Build OCROptions from parameters.
+    """Build OCROptions from parameters using dynamic conversion.
 
     Args:
         params: Tool parameters
@@ -255,31 +242,21 @@ def build_ocr_options(params: dict[str, Any]) -> Any:
     Returns:
         OCROptions instance or None
     """
-    from paddleocr._api_client.models import OCROptions
-
-    option_map = {
-        "useDocOrientationClassify": "use_doc_orientation_classify",
-        "useDocUnwarping": "use_doc_unwarping",
-        "useTextlineOrientation": "use_textline_orientation",
-        "textDetLimitSideLen": "text_det_limit_side_len",
-        "textDetLimitType": "text_det_limit_type",
-        "textDetThresh": "text_det_thresh",
-        "textDetBoxThresh": "text_det_box_thresh",
-        "textDetUnclipRatio": "text_det_unclip_ratio",
-        "textRecScoreThresh": "text_rec_score_thresh",
-        "visualize": "visualize",
-    }
+    from paddleocr import OCROptions
 
     options_dict = {}
-    for api_name, option_name in option_map.items():
-        if api_name in params and params[api_name] is not None:
-            options_dict[option_name] = params[api_name]
+    for api_name, value in params.items():
+        if value is None:
+            continue
+        # Convert camelCase to snake_case
+        option_name = camel_to_snake(api_name)
+        options_dict[option_name] = value
 
     return OCROptions(**options_dict) if options_dict else None
 
 
 def build_pp_structure_v3_options(params: dict[str, Any]) -> Any:
-    """Build PPStructureV3Options from parameters.
+    """Build PPStructureV3Options from parameters using dynamic conversion.
 
     Args:
         params: Tool parameters
@@ -287,60 +264,24 @@ def build_pp_structure_v3_options(params: dict[str, Any]) -> Any:
     Returns:
         PPStructureV3Options instance or None
     """
-    from paddleocr._api_client.models import PPStructureV3Options
-
-    option_map = {
-        "useDocOrientationClassify": "use_doc_orientation_classify",
-        "useDocUnwarping": "use_doc_unwarping",
-        "useTextlineOrientation": "use_textline_orientation",
-        "useSealRecognition": "use_seal_recognition",
-        "useTableRecognition": "use_table_recognition",
-        "useFormulaRecognition": "use_formula_recognition",
-        "useChartRecognition": "use_chart_recognition",
-        "useRegionDetection": "use_region_detection",
-        "formatBlockContent": "format_block_content",
-        "layoutThreshold": "layout_threshold",
-        "layoutNms": "layout_nms",
-        "layoutUnclipRatio": "layout_unclip_ratio",
-        "layoutMergeBboxesMode": "layout_merge_bboxes_mode",
-        "textDetLimitSideLen": "text_det_limit_side_len",
-        "textDetLimitType": "text_det_limit_type",
-        "textDetThresh": "text_det_thresh",
-        "textDetBoxThresh": "text_det_box_thresh",
-        "textDetUnclipRatio": "text_det_unclip_ratio",
-        "textRecScoreThresh": "text_rec_score_thresh",
-        "sealDetLimitSideLen": "seal_det_limit_side_len",
-        "sealDetLimitType": "seal_det_limit_type",
-        "sealDetThresh": "seal_det_thresh",
-        "sealDetBoxThresh": "seal_det_box_thresh",
-        "sealDetUnclipRatio": "seal_det_unclip_ratio",
-        "sealRecScoreThresh": "seal_rec_score_thresh",
-        "useWiredTableCellsTransToHtml": "use_wired_table_cells_trans_to_html",
-        "useWirelessTableCellsTransToHtml": "use_wireless_table_cells_trans_to_html",
-        "useTableOrientationClassify": "use_table_orientation_classify",
-        "useOcrResultsWithTableCells": "use_ocr_results_with_table_cells",
-        "useE2eWiredTableRecModel": "use_e2e_wired_table_rec_model",
-        "useE2eWirelessTableRecModel": "use_e2e_wireless_table_rec_model",
-        "markdownIgnoreLabels": "markdown_ignore_labels",
-        "prettifyMarkdown": "prettify_markdown",
-        "showFormulaNumber": "show_formula_number",
-        "visualize": "visualize",
-    }
+    from paddleocr import PPStructureV3Options
 
     options_dict = {}
-    for api_name, option_name in option_map.items():
-        if api_name in params and params[api_name] is not None:
-            value = params[api_name]
-            # Handle markdownIgnoreLabels conversion
-            if api_name == "markdownIgnoreLabels" and isinstance(value, str):
-                value = [label.strip() for label in value.split(",") if label.strip()]
-            options_dict[option_name] = value
+    for api_name, value in params.items():
+        if value is None:
+            continue
+        # Convert camelCase to snake_case
+        option_name = camel_to_snake(api_name)
+        # Handle markdownIgnoreLabels conversion
+        if api_name == "markdownIgnoreLabels" and isinstance(value, str):
+            value = [label.strip() for label in value.split(",") if label.strip()]
+        options_dict[option_name] = value
 
     return PPStructureV3Options(**options_dict) if options_dict else None
 
 
 def build_paddleocr_vl_options(params: dict[str, Any]) -> Any:
-    """Build PaddleOCRVLOptions from parameters.
+    """Build PaddleOCRVLOptions from parameters using dynamic conversion.
 
     Args:
         params: Tool parameters
@@ -348,48 +289,21 @@ def build_paddleocr_vl_options(params: dict[str, Any]) -> Any:
     Returns:
         PaddleOCRVLOptions instance or None
     """
-    from paddleocr._api_client.models import PaddleOCRVLOptions
-
-    option_map = {
-        "useDocOrientationClassify": "use_doc_orientation_classify",
-        "useDocUnwarping": "use_doc_unwarping",
-        "useLayoutDetection": "use_layout_detection",
-        "useChartRecognition": "use_chart_recognition",
-        "useSealRecognition": "use_seal_recognition",
-        "formatBlockContent": "format_block_content",
-        "layoutThreshold": "layout_threshold",
-        "layoutNms": "layout_nms",
-        "layoutUnclipRatio": "layout_unclip_ratio",
-        "layoutMergeBboxesMode": "layout_merge_bboxes_mode",
-        "layoutShapeMode": "layout_shape_mode",
-        "promptLabel": "prompt_label",
-        "repetitionPenalty": "repetition_penalty",
-        "temperature": "temperature",
-        "topP": "top_p",
-        "minPixels": "min_pixels",
-        "maxPixels": "max_pixels",
-        "maxNewTokens": "max_new_tokens",
-        "mergeLayoutBlocks": "merge_layout_blocks",
-        "markdownIgnoreLabels": "markdown_ignore_labels",
-        "prettifyMarkdown": "prettify_markdown",
-        "showFormulaNumber": "show_formula_number",
-        "restructurePages": "restructure_pages",
-        "mergeTables": "merge_tables",
-        "relevelTitles": "relevel_titles",
-        "visualize": "visualize",
-    }
+    from paddleocr import PaddleOCRVLOptions
 
     options_dict = {}
-    for api_name, option_name in option_map.items():
-        if api_name in params and params[api_name] is not None:
-            value = params[api_name]
-            # Handle promptLabel conversion
-            if api_name == "promptLabel" and value == "undefined":
-                continue
-            # Handle markdownIgnoreLabels conversion
-            if api_name == "markdownIgnoreLabels" and isinstance(value, str):
-                value = [label.strip() for label in value.split(",") if label.strip()]
-            options_dict[option_name] = value
+    for api_name, value in params.items():
+        if value is None:
+            continue
+        # Handle promptLabel conversion - skip if "undefined"
+        if api_name == "promptLabel" and value == "undefined":
+            continue
+        # Convert camelCase to snake_case
+        option_name = camel_to_snake(api_name)
+        # Handle markdownIgnoreLabels conversion
+        if api_name == "markdownIgnoreLabels" and isinstance(value, str):
+            value = [label.strip() for label in value.split(",") if label.strip()]
+        options_dict[option_name] = value
 
     return PaddleOCRVLOptions(**options_dict) if options_dict else None
 
@@ -464,9 +378,9 @@ def process_images_from_result(
         tool_instance: Tool instance for file operations
     """
     images = []
-    image_path_map = {}  # key: image path, value: UploadFileResponse
-    failed_images = []  # images that failed to process
-    blob_messages = []  # blob messages to yield: [(data, meta), ...]
+    image_path_map = {}
+    failed_images = []
+    blob_messages = []
     image_counter = 0
 
     logger.debug("Processing images from API result")
@@ -474,18 +388,14 @@ def process_images_from_result(
     for item in result.get("result", {}).get("layoutParsingResults", []):
         markdown_data = item.get("markdown", {})
         if markdown_data:
-            # Get image dictionary {path: url} from markdown
             image_dict = markdown_data.get("images", {})
             if image_dict:
-                logger.debug(
-                    f"Found {len(image_dict)} images to process: {list(image_dict.keys())}"
-                )
+                logger.debug(f"Found {len(image_dict)} images to process: {list(image_dict.keys())}")
             else:
                 logger.debug("No images found in this markdown item")
 
             for image_path, image_url in image_dict.items():
                 if image_path in image_path_map:
-                    # Already processed this path
                     logger.debug(f"Skipping already processed image: {image_path}")
                     continue
 
@@ -494,18 +404,15 @@ def process_images_from_result(
                 image_processed_successfully = False
 
                 try:
-                    # Download image first
                     try:
                         image_bytes = download_image_from_url(image_url)
                     except Exception as download_error:
                         logger.warning(
                             f"Failed to download image {image_path} from {image_url}: {download_error}"
                         )
-                        # Cannot download - cannot create blob message, mark as failed for markdown
                         failed_images.append(image_path)
                         continue
 
-                    # Upload image to dify with error handling
                     file_name = f"paddleocr_image_{image_counter}.jpg"
                     logger.debug(f"Uploading image {image_path} as {file_name}")
 
@@ -521,7 +428,6 @@ def process_images_from_result(
                             f"Successfully uploaded image {image_path}, preview_url: {upload_response.preview_url}"
                         )
 
-                        # Check if upload was successful but no preview URL
                         if not upload_response.preview_url:
                             logger.warning(
                                 f"No preview URL for uploaded image {image_path}, creating blob message as fallback"
@@ -535,7 +441,6 @@ def process_images_from_result(
 
                     except Exception as upload_error:
                         logger.error(f"Failed to upload image {image_path} to dify: {upload_error}")
-                        # Create blob message as fallback when upload fails
                         logger.info(
                             f"Creating blob message as fallback for failed upload of {image_path}"
                         )
